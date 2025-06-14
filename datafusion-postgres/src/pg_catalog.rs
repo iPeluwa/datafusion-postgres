@@ -1155,6 +1155,178 @@ pub fn create_current_schema_udf() -> ScalarUDF {
     )
 }
 
+pub fn create_version_udf() -> ScalarUDF {
+    // Define the function implementation
+    let func = move |_args: &[ColumnarValue]| {
+        // Create a UTF8 array with DataFusion-Postgres version info
+        let mut builder = StringBuilder::new();
+        builder.append_value("DataFusion-Postgres 0.5.1, compiled with DataFusion 47.0.0");
+        let array: ArrayRef = Arc::new(builder.finish());
+
+        Ok(ColumnarValue::Array(array))
+    };
+
+    // Wrap the implementation in a scalar function
+    create_udf(
+        "version",
+        vec![],
+        DataType::Utf8,
+        Volatility::Immutable,
+        Arc::new(func),
+    )
+}
+
+pub fn create_pg_version_num_udf() -> ScalarUDF {
+    // Define the function implementation
+    let func = move |_args: &[ColumnarValue]| {
+        // PostgreSQL version number format: major * 10000 + minor * 100 + patch
+        // We'll use a fake version 16.1.0 for compatibility
+        let mut builder = StringBuilder::new();
+        builder.append_value("160100");
+        let array: ArrayRef = Arc::new(builder.finish());
+
+        Ok(ColumnarValue::Array(array))
+    };
+
+    // Wrap the implementation in a scalar function
+    create_udf(
+        "pg_version_num",
+        vec![],
+        DataType::Utf8,
+        Volatility::Immutable,
+        Arc::new(func),
+    )
+}
+
+pub fn create_current_database_udf() -> ScalarUDF {
+    // Define the function implementation
+    let func = move |_args: &[ColumnarValue]| {
+        // Return the default catalog name
+        let mut builder = StringBuilder::new();
+        builder.append_value("datafusion");
+        let array: ArrayRef = Arc::new(builder.finish());
+
+        Ok(ColumnarValue::Array(array))
+    };
+
+    // Wrap the implementation in a scalar function
+    create_udf(
+        "current_database",
+        vec![],
+        DataType::Utf8,
+        Volatility::Immutable,
+        Arc::new(func),
+    )
+}
+
+pub fn create_current_user_udf() -> ScalarUDF {
+    // Define the function implementation
+    let func = move |_args: &[ColumnarValue]| {
+        // Return a default user name
+        let mut builder = StringBuilder::new();
+        builder.append_value("postgres");
+        let array: ArrayRef = Arc::new(builder.finish());
+
+        Ok(ColumnarValue::Array(array))
+    };
+
+    // Wrap the implementation in a scalar function
+    create_udf(
+        "current_user",
+        vec![],
+        DataType::Utf8,
+        Volatility::Immutable,
+        Arc::new(func),
+    )
+}
+
+pub fn create_session_user_udf() -> ScalarUDF {
+    // Define the function implementation
+    let func = move |_args: &[ColumnarValue]| {
+        // Return a default user name
+        let mut builder = StringBuilder::new();
+        builder.append_value("postgres");
+        let array: ArrayRef = Arc::new(builder.finish());
+
+        Ok(ColumnarValue::Array(array))
+    };
+
+    // Wrap the implementation in a scalar function
+    create_udf(
+        "session_user",
+        vec![],
+        DataType::Utf8,
+        Volatility::Immutable,
+        Arc::new(func),
+    )
+}
+
+pub fn create_user_udf() -> ScalarUDF {
+    // Define the function implementation
+    let func = move |_args: &[ColumnarValue]| {
+        // Return a default user name
+        let mut builder = StringBuilder::new();
+        builder.append_value("postgres");
+        let array: ArrayRef = Arc::new(builder.finish());
+
+        Ok(ColumnarValue::Array(array))
+    };
+
+    // Wrap the implementation in a scalar function
+    create_udf(
+        "user",
+        vec![],
+        DataType::Utf8,
+        Volatility::Immutable,
+        Arc::new(func),
+    )
+}
+
+pub fn create_pg_encoding_to_char_udf() -> ScalarUDF {
+    // Define the function implementation
+    let func = move |args: &[ColumnarValue]| {
+        let args = ColumnarValue::values_to_arrays(args)?;
+        let _encoding_id = &args[0]; // We'll ignore the input and always return UTF8
+
+        // Always return UTF8 as the encoding
+        let mut builder = StringBuilder::new();
+        builder.append_value("UTF8");
+        let array: ArrayRef = Arc::new(builder.finish());
+
+        Ok(ColumnarValue::Array(array))
+    };
+
+    // Wrap the implementation in a scalar function
+    create_udf(
+        "pg_encoding_to_char",
+        vec![DataType::Int32],
+        DataType::Utf8,
+        Volatility::Immutable,
+        Arc::new(func),
+    )
+}
+
+pub fn create_getdatabaseencoding_udf() -> ScalarUDF {
+    // Define the function implementation
+    let func = move |_args: &[ColumnarValue]| {
+        // Always return UTF8 as the encoding
+        let mut builder = StringBuilder::new();
+        builder.append_value("UTF8");
+        let array: ArrayRef = Arc::new(builder.finish());
+
+        Ok(ColumnarValue::Array(array))
+    };
+
+    // Wrap the implementation in a scalar function
+    create_udf(
+        "getdatabaseencoding",
+        vec![],
+        DataType::Utf8,
+        Volatility::Immutable,
+        Arc::new(func),
+    )
+}
+
 /// Install pg_catalog and postgres UDFs to current `SessionContext`
 pub fn setup_pg_catalog(
     session_context: &SessionContext,
@@ -1173,6 +1345,20 @@ pub fn setup_pg_catalog(
 
     session_context.register_udf(create_current_schema_udf());
     session_context.register_udf(create_current_schemas_udf());
+
+    // Register system information functions
+    session_context.register_udf(create_version_udf());
+    session_context.register_udf(create_pg_version_num_udf());
+
+    // Register database/user functions
+    session_context.register_udf(create_current_database_udf());
+    session_context.register_udf(create_current_user_udf());
+    session_context.register_udf(create_session_user_udf());
+    session_context.register_udf(create_user_udf());
+
+    // Register encoding functions
+    session_context.register_udf(create_pg_encoding_to_char_udf());
+    session_context.register_udf(create_getdatabaseencoding_udf());
 
     Ok(())
 }
