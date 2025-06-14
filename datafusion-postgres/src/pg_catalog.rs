@@ -73,6 +73,12 @@ impl SchemaProvider for PgCatalogSchemaProvider {
                     StreamingTable::try_new(Arc::clone(table.schema()), vec![table]).unwrap(),
                 )))
             }
+            PG_CATALOG_TABLE_PG_ATTRIBUTE => {
+                let table = Arc::new(PgAttributeTable::new(self.catalog_list.clone()));
+                Ok(Some(Arc::new(
+                    StreamingTable::try_new(Arc::clone(table.schema()), vec![table]).unwrap(),
+                )))
+            }
             _ => Ok(None),
         }
     }
@@ -672,4 +678,251 @@ pub fn setup_pg_catalog(
     session_context.register_udf(create_current_schemas_udf());
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct PgAttributeTable {
+    schema: SchemaRef,
+    catalog_list: Arc<dyn CatalogProviderList>,
+}
+
+impl PgAttributeTable {
+    pub fn new(catalog_list: Arc<dyn CatalogProviderList>) -> Self {
+        // Define the schema for pg_attribute
+        // This matches key columns from PostgreSQL's pg_attribute
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("attrelid", DataType::Int32, false), // OID of the table this column belongs to
+            Field::new("attname", DataType::Utf8, false),   // Column name
+            Field::new("atttypid", DataType::Int32, false), // Data type OID
+            Field::new("attlen", DataType::Int16, false),   // Length of the type
+            Field::new("attnum", DataType::Int16, false), // Column number (1-based for user columns)
+            Field::new("attcacheoff", DataType::Int32, false), // Always -1 in storage
+            Field::new("atttypmod", DataType::Int32, false), // Type modifier (-1 if not applicable)
+            Field::new("attndims", DataType::Int16, false), // Number of array dimensions (0 if not array)
+            Field::new("attbyval", DataType::Boolean, false), // True if type is passed by value
+            Field::new("attalign", DataType::Utf8, false),  // Type alignment requirement
+            Field::new("attstorage", DataType::Utf8, false), // Storage strategy
+            Field::new("attcompression", DataType::Utf8, false), // Compression method
+            Field::new("attnotnull", DataType::Boolean, false), // True if column has NOT NULL constraint
+            Field::new("atthasdef", DataType::Boolean, false),  // True if column has default value
+            Field::new("atthasmissing", DataType::Boolean, false), // True if column has missing value
+            Field::new("attidentity", DataType::Utf8, false),      // Identity column type
+            Field::new("attgenerated", DataType::Utf8, false),     // Generated column type
+            Field::new("attisdropped", DataType::Boolean, false),  // True if column is dropped
+            Field::new("attislocal", DataType::Boolean, false), // True if column is defined locally
+            Field::new("attinhcount", DataType::Int16, false),  // Number of direct ancestors
+            Field::new("attcollation", DataType::Int32, false), // Collation OID
+            Field::new("attacl", DataType::Utf8, true),         // Access privileges
+            Field::new("attoptions", DataType::Utf8, true),     // Attribute-level options
+            Field::new("attfdwoptions", DataType::Utf8, true),  // Foreign data wrapper options
+            Field::new("attmissingval", DataType::Utf8, true),  // Missing value for column
+        ]));
+
+        Self {
+            schema,
+            catalog_list,
+        }
+    }
+
+    /// Generate record batches based on the current state of the catalog
+    async fn get_data(
+        schema: SchemaRef,
+        catalog_list: Arc<dyn CatalogProviderList>,
+    ) -> Result<RecordBatch> {
+        use crate::datatypes::into_pg_type;
+
+        // Vectors to store column data
+        let mut attrelids = Vec::new();
+        let mut attnames = Vec::new();
+        let mut atttypids = Vec::new();
+        let mut attlens = Vec::new();
+        let mut attnums = Vec::new();
+        let mut attcacheoffs = Vec::new();
+        let mut atttypemods = Vec::new();
+        let mut attndimss = Vec::new();
+        let mut attbyvals = Vec::new();
+        let mut attaligns = Vec::new();
+        let mut attstorages = Vec::new();
+        let mut attcompressions = Vec::new();
+        let mut attnotnulls = Vec::new();
+        let mut atthasdefs = Vec::new();
+        let mut atthasmissings = Vec::new();
+        let mut attidentities = Vec::new();
+        let mut attgenerateds = Vec::new();
+        let mut attisdroppeds = Vec::new();
+        let mut attislocals = Vec::new();
+        let mut attinhcounts = Vec::new();
+        let mut attcollations = Vec::new();
+        let mut attacls: Vec<Option<String>> = Vec::new();
+        let mut attoptions: Vec<Option<String>> = Vec::new();
+        let mut attfdwoptions: Vec<Option<String>> = Vec::new();
+        let mut attmissingvals: Vec<Option<String>> = Vec::new();
+
+        // Start OID counter (should be consistent with pg_class)
+        let mut next_oid = 10000;
+
+        // Iterate through all catalogs and schemas
+        for catalog_name in catalog_list.catalog_names() {
+            if let Some(catalog) = catalog_list.catalog(&catalog_name) {
+                for schema_name in catalog.schema_names() {
+                    if let Some(schema_provider) = catalog.schema(&schema_name) {
+                        let _schema_oid = next_oid;
+                        next_oid += 1;
+
+                        // Process all tables in this schema
+                        for table_name in schema_provider.table_names() {
+                            let table_oid = next_oid;
+                            next_oid += 1;
+
+                            if let Some(table) = schema_provider.table(&table_name).await? {
+                                let table_schema = table.schema();
+
+                                // Process each column in the table
+                                for (column_idx, field) in table_schema.fields().iter().enumerate()
+                                {
+                                    let pg_type = into_pg_type(field.data_type())
+                                        .unwrap_or_else(|_| pgwire::api::Type::UNKNOWN);
+
+                                    attrelids.push(table_oid);
+                                    attnames.push(field.name().clone());
+                                    atttypids.push(pg_type.oid() as i32);
+
+                                    // Set attlen based on data type
+                                    let type_len = match field.data_type() {
+                                        DataType::Int8 => 1,
+                                        DataType::Int16 => 2,
+                                        DataType::Int32 => 4,
+                                        DataType::Int64 => 8,
+                                        DataType::Float32 => 4,
+                                        DataType::Float64 => 8,
+                                        DataType::Boolean => 1,
+                                        DataType::Date32 => 4,
+                                        DataType::Date64 => 8,
+                                        DataType::Timestamp(_, _) => 8,
+                                        DataType::Utf8 | DataType::LargeUtf8 => -1, // Variable length
+                                        _ => -1, // Variable length for other types
+                                    };
+                                    attlens.push(type_len);
+
+                                    attnums.push((column_idx + 1) as i16); // 1-based column numbers
+                                    attcacheoffs.push(-1); // Always -1 in storage
+                                    atttypemods.push(-1); // No type modifier by default
+
+                                    // Check if it's an array type
+                                    let is_array = matches!(
+                                        field.data_type(),
+                                        DataType::List(_)
+                                            | DataType::LargeList(_)
+                                            | DataType::FixedSizeList(_, _)
+                                    );
+                                    attndimss.push(if is_array { 1 } else { 0 });
+
+                                    // Set attbyval based on type
+                                    let by_val = matches!(
+                                        field.data_type(),
+                                        DataType::Boolean
+                                            | DataType::Int8
+                                            | DataType::Int16
+                                            | DataType::Int32
+                                            | DataType::Float32
+                                            | DataType::Date32
+                                    );
+                                    attbyvals.push(by_val);
+
+                                    // Set alignment based on type size
+                                    let alignment = match field.data_type() {
+                                        DataType::Int8 | DataType::Boolean => "c",
+                                        DataType::Int16 => "s",
+                                        DataType::Int32 | DataType::Float32 | DataType::Date32 => {
+                                            "i"
+                                        }
+                                        DataType::Int64
+                                        | DataType::Float64
+                                        | DataType::Date64
+                                        | DataType::Timestamp(_, _) => "d",
+                                        _ => "i", // Default to integer alignment
+                                    };
+                                    attaligns.push(alignment.to_string());
+
+                                    // Storage strategy - 'p' for plain, 'x' for extended
+                                    let storage = match field.data_type() {
+                                        DataType::Utf8
+                                        | DataType::LargeUtf8
+                                        | DataType::Binary
+                                        | DataType::LargeBinary => "x",
+                                        _ => "p",
+                                    };
+                                    attstorages.push(storage.to_string());
+
+                                    attcompressions.push("".to_string()); // No compression by default
+                                    attnotnulls.push(!field.is_nullable()); // NOT NULL constraint
+                                    atthasdefs.push(false); // No default values implemented yet
+                                    atthasmissings.push(false); // No missing values
+                                    attidentities.push("".to_string()); // No identity columns
+                                    attgenerateds.push("".to_string()); // No generated columns
+                                    attisdroppeds.push(false); // Column is not dropped
+                                    attislocals.push(true); // Column is defined locally
+                                    attinhcounts.push(0); // No inheritance
+                                    attcollations.push(0); // No specific collation
+                                    attacls.push(None); // No specific ACLs
+                                    attoptions.push(None); // No options
+                                    attfdwoptions.push(None); // No FDW options
+                                    attmissingvals.push(None); // No missing values
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create Arrow arrays from the collected data
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int32Array::from(attrelids)),
+            Arc::new(StringArray::from(attnames)),
+            Arc::new(Int32Array::from(atttypids)),
+            Arc::new(Int16Array::from(attlens)),
+            Arc::new(Int16Array::from(attnums)),
+            Arc::new(Int32Array::from(attcacheoffs)),
+            Arc::new(Int32Array::from(atttypemods)),
+            Arc::new(Int16Array::from(attndimss)),
+            Arc::new(BooleanArray::from(attbyvals)),
+            Arc::new(StringArray::from(attaligns)),
+            Arc::new(StringArray::from(attstorages)),
+            Arc::new(StringArray::from(attcompressions)),
+            Arc::new(BooleanArray::from(attnotnulls)),
+            Arc::new(BooleanArray::from(atthasdefs)),
+            Arc::new(BooleanArray::from(atthasmissings)),
+            Arc::new(StringArray::from(attidentities)),
+            Arc::new(StringArray::from(attgenerateds)),
+            Arc::new(BooleanArray::from(attisdroppeds)),
+            Arc::new(BooleanArray::from(attislocals)),
+            Arc::new(Int16Array::from(attinhcounts)),
+            Arc::new(Int32Array::from(attcollations)),
+            Arc::new(StringArray::from_iter(attacls.into_iter())),
+            Arc::new(StringArray::from_iter(attoptions.into_iter())),
+            Arc::new(StringArray::from_iter(attfdwoptions.into_iter())),
+            Arc::new(StringArray::from_iter(attmissingvals.into_iter())),
+        ];
+
+        // Create a record batch
+        let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+
+        Ok(batch)
+    }
+}
+
+impl PartitionStream for PgAttributeTable {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let catalog_list = self.catalog_list.clone();
+        let schema = Arc::clone(&self.schema);
+        Box::pin(RecordBatchStreamAdapter::new(
+            schema.clone(),
+            futures::stream::once(async move { Self::get_data(schema, catalog_list).await }),
+        ))
+    }
 }
