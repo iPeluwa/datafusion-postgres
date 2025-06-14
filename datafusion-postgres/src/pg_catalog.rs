@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    as_boolean_array, ArrayRef, BooleanArray, Float64Array, Int16Array, Int32Array, RecordBatch,
-    StringArray, StringBuilder,
+    as_boolean_array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
+    RecordBatch, StringArray, StringBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::streaming::StreamingTable;
@@ -75,6 +75,12 @@ impl SchemaProvider for PgCatalogSchemaProvider {
             }
             PG_CATALOG_TABLE_PG_ATTRIBUTE => {
                 let table = Arc::new(PgAttributeTable::new(self.catalog_list.clone()));
+                Ok(Some(Arc::new(
+                    StreamingTable::try_new(Arc::clone(table.schema()), vec![table]).unwrap(),
+                )))
+            }
+            PG_CATALOG_TABLE_PG_PROC => {
+                let table = Arc::new(PgProcTable::new(self.catalog_list.clone()));
                 Ok(Some(Arc::new(
                     StreamingTable::try_new(Arc::clone(table.schema()), vec![table]).unwrap(),
                 )))
@@ -1596,6 +1602,570 @@ impl PgAttributeTable {
 }
 
 impl PartitionStream for PgAttributeTable {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let catalog_list = self.catalog_list.clone();
+        let schema = Arc::clone(&self.schema);
+        Box::pin(RecordBatchStreamAdapter::new(
+            schema.clone(),
+            futures::stream::once(async move { Self::get_data(schema, catalog_list).await }),
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct PgProcTable {
+    schema: SchemaRef,
+    catalog_list: Arc<dyn CatalogProviderList>,
+}
+
+impl PgProcTable {
+    pub fn new(catalog_list: Arc<dyn CatalogProviderList>) -> Self {
+        // Define the schema for pg_proc
+        // This matches key columns from PostgreSQL's pg_proc
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("oid", DataType::Int32, false), // Function OID
+            Field::new("proname", DataType::Utf8, false), // Function name
+            Field::new("pronamespace", DataType::Int32, false), // Namespace OID
+            Field::new("proowner", DataType::Int32, false), // Owner OID
+            Field::new("prolang", DataType::Int32, false), // Language OID
+            Field::new("procost", DataType::Float32, false), // Execution cost
+            Field::new("prorows", DataType::Float32, false), // Number of result rows
+            Field::new("provariadic", DataType::Int32, false), // Variadic array parameter type
+            Field::new("prosupport", DataType::Int32, false), // Support function OID
+            Field::new("prokind", DataType::Utf8, false), // Function kind (f=function, p=procedure, etc.)
+            Field::new("prosecdef", DataType::Boolean, false), // Security definer?
+            Field::new("proleakproof", DataType::Boolean, false), // Leak proof?
+            Field::new("proisstrict", DataType::Boolean, false), // Strict (returns null on null input)?
+            Field::new("proretset", DataType::Boolean, false),   // Returns a set?
+            Field::new("provolatile", DataType::Utf8, false), // Volatility (i=immutable, s=stable, v=volatile)
+            Field::new("proparallel", DataType::Utf8, false), // Parallel safety (s=safe, r=restricted, u=unsafe)
+            Field::new("pronargs", DataType::Int16, false),   // Number of input arguments
+            Field::new("pronargdefaults", DataType::Int16, false), // Number of arguments with defaults
+            Field::new("prorettype", DataType::Int32, false),      // Return type OID
+            Field::new("proargtypes", DataType::Utf8, false), // Argument types (simplified as string)
+            Field::new("proallargtypes", DataType::Utf8, true), // All argument types including OUT
+            Field::new("proargmodes", DataType::Utf8, true), // Argument modes (i=IN, o=OUT, b=INOUT, v=VARIADIC)
+            Field::new("proargnames", DataType::Utf8, true), // Argument names
+            Field::new("proargdefaults", DataType::Utf8, true), // Default values for arguments
+            Field::new("protrftypes", DataType::Utf8, true), // Transform function type OIDs
+            Field::new("prosrc", DataType::Utf8, false),     // Function source code
+            Field::new("probin", DataType::Utf8, true),      // Binary file name for C functions
+            Field::new("prosqlbody", DataType::Utf8, true),  // SQL body for SQL-language functions
+            Field::new("proconfig", DataType::Utf8, true), // Function-local configuration settings
+            Field::new("proacl", DataType::Utf8, true),    // Access privileges
+        ]));
+
+        Self {
+            schema,
+            catalog_list,
+        }
+    }
+
+    /// Generate record batches based on available functions
+    async fn get_data(
+        schema: SchemaRef,
+        _catalog_list: Arc<dyn CatalogProviderList>,
+    ) -> Result<RecordBatch> {
+        // Define common PostgreSQL system functions that we support
+        #[allow(clippy::type_complexity)]
+        let functions: Vec<(
+            i32,
+            &str,
+            i32,
+            i32,
+            i32,
+            f32,
+            f32,
+            i32,
+            i32,
+            &str,
+            bool,
+            bool,
+            bool,
+            bool,
+            &str,
+            &str,
+            i16,
+            i16,
+            i32,
+            &str,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+            &str,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+        )> = vec![
+            // System information functions
+            (
+                2200,
+                "version",
+                11,
+                10,
+                12,
+                1.0,
+                0.0,
+                0,
+                0,
+                "f",
+                false,
+                true,
+                true,
+                false,
+                "i",
+                "s",
+                0,
+                0,
+                25,
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "SELECT 'DataFusion-Postgres 0.5.1'",
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                2201,
+                "pg_version_num",
+                11,
+                10,
+                12,
+                1.0,
+                0.0,
+                0,
+                0,
+                "f",
+                false,
+                true,
+                true,
+                false,
+                "i",
+                "s",
+                0,
+                0,
+                25,
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "SELECT '160100'",
+                None,
+                None,
+                None,
+                None,
+            ),
+            // Database/user functions
+            (
+                2202,
+                "current_database",
+                11,
+                10,
+                12,
+                1.0,
+                0.0,
+                0,
+                0,
+                "f",
+                false,
+                true,
+                true,
+                false,
+                "i",
+                "s",
+                0,
+                0,
+                25,
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "SELECT 'datafusion'",
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                2203,
+                "current_user",
+                11,
+                10,
+                12,
+                1.0,
+                0.0,
+                0,
+                0,
+                "f",
+                false,
+                true,
+                true,
+                false,
+                "i",
+                "s",
+                0,
+                0,
+                25,
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "SELECT 'postgres'",
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                2204,
+                "session_user",
+                11,
+                10,
+                12,
+                1.0,
+                0.0,
+                0,
+                0,
+                "f",
+                false,
+                true,
+                true,
+                false,
+                "i",
+                "s",
+                0,
+                0,
+                25,
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "SELECT 'postgres'",
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                2205,
+                "user",
+                11,
+                10,
+                12,
+                1.0,
+                0.0,
+                0,
+                0,
+                "f",
+                false,
+                true,
+                true,
+                false,
+                "i",
+                "s",
+                0,
+                0,
+                25,
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "SELECT 'postgres'",
+                None,
+                None,
+                None,
+                None,
+            ),
+            // Schema functions
+            (
+                2206,
+                "current_schema",
+                11,
+                10,
+                12,
+                1.0,
+                0.0,
+                0,
+                0,
+                "f",
+                false,
+                true,
+                true,
+                false,
+                "i",
+                "s",
+                0,
+                0,
+                25,
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "SELECT 'public'",
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                2207,
+                "current_schemas",
+                11,
+                10,
+                12,
+                1.0,
+                0.0,
+                0,
+                0,
+                "f",
+                false,
+                true,
+                true,
+                false,
+                "i",
+                "s",
+                1,
+                0,
+                1009,
+                "16",
+                None,
+                None,
+                Some("implicit"),
+                None,
+                None,
+                "SELECT ARRAY['public']",
+                None,
+                None,
+                None,
+                None,
+            ),
+            // Encoding functions
+            (
+                2208,
+                "getdatabaseencoding",
+                11,
+                10,
+                12,
+                1.0,
+                0.0,
+                0,
+                0,
+                "f",
+                false,
+                true,
+                true,
+                false,
+                "i",
+                "s",
+                0,
+                0,
+                25,
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "SELECT 'UTF8'",
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                2209,
+                "pg_encoding_to_char",
+                11,
+                10,
+                12,
+                1.0,
+                0.0,
+                0,
+                0,
+                "f",
+                false,
+                true,
+                true,
+                false,
+                "i",
+                "s",
+                1,
+                0,
+                25,
+                "23",
+                None,
+                None,
+                Some("encoding_id"),
+                None,
+                None,
+                "SELECT 'UTF8'",
+                None,
+                None,
+                None,
+                None,
+            ),
+        ];
+
+        // Convert to Arrow arrays
+        let mut oids = Vec::new();
+        let mut pronames = Vec::new();
+        let mut pronamespaces = Vec::new();
+        let mut proowners = Vec::new();
+        let mut prolangs = Vec::new();
+        let mut procosts = Vec::new();
+        let mut prorows_vec = Vec::new();
+        let mut provariadics = Vec::new();
+        let mut prosupports = Vec::new();
+        let mut prokinds = Vec::new();
+        let mut prosecdefs = Vec::new();
+        let mut proleakproofs = Vec::new();
+        let mut proisstricts = Vec::new();
+        let mut proretsets = Vec::new();
+        let mut provolatiles = Vec::new();
+        let mut proparallels = Vec::new();
+        let mut pronargs_vec = Vec::new();
+        let mut pronargdefaults_vec = Vec::new();
+        let mut prorettypes = Vec::new();
+        let mut proargtypes_vec = Vec::new();
+        let mut proallargtypes: Vec<Option<String>> = Vec::new();
+        let mut proargmodes: Vec<Option<String>> = Vec::new();
+        let mut proargnames: Vec<Option<String>> = Vec::new();
+        let mut proargdefaults: Vec<Option<String>> = Vec::new();
+        let mut protrftypes: Vec<Option<String>> = Vec::new();
+        let mut prosrcs = Vec::new();
+        let mut probins: Vec<Option<String>> = Vec::new();
+        let mut prosqlbodies: Vec<Option<String>> = Vec::new();
+        let mut proconfigs: Vec<Option<String>> = Vec::new();
+        let mut proacls: Vec<Option<String>> = Vec::new();
+
+        for (
+            oid,
+            proname,
+            pronamespace,
+            proowner,
+            prolang,
+            procost,
+            prorows,
+            provariadic,
+            prosupport,
+            prokind,
+            prosecdef,
+            proleakproof,
+            proisstrict,
+            proretset,
+            provolatile,
+            proparallel,
+            pronargs,
+            pronargdefaults,
+            prorettype,
+            proargtypes,
+            proallargtype,
+            proargmode,
+            proargname,
+            proargdefault,
+            protrttype,
+            prosrc,
+            probin,
+            prosqlbody,
+            proconfig,
+            proacl,
+        ) in functions
+        {
+            oids.push(oid);
+            pronames.push(proname.to_string());
+            pronamespaces.push(pronamespace);
+            proowners.push(proowner);
+            prolangs.push(prolang);
+            procosts.push(procost);
+            prorows_vec.push(prorows);
+            provariadics.push(provariadic);
+            prosupports.push(prosupport);
+            prokinds.push(prokind.to_string());
+            prosecdefs.push(prosecdef);
+            proleakproofs.push(proleakproof);
+            proisstricts.push(proisstrict);
+            proretsets.push(proretset);
+            provolatiles.push(provolatile.to_string());
+            proparallels.push(proparallel.to_string());
+            pronargs_vec.push(pronargs);
+            pronargdefaults_vec.push(pronargdefaults);
+            prorettypes.push(prorettype);
+            proargtypes_vec.push(proargtypes.to_string());
+            proallargtypes.push(proallargtype.map(|s| s.to_string()));
+            proargmodes.push(proargmode.map(|s| s.to_string()));
+            proargnames.push(proargname.map(|s| s.to_string()));
+            proargdefaults.push(proargdefault.map(|s| s.to_string()));
+            protrftypes.push(protrttype.map(|s| s.to_string()));
+            prosrcs.push(prosrc.to_string());
+            probins.push(probin.map(|s| s.to_string()));
+            prosqlbodies.push(prosqlbody.map(|s| s.to_string()));
+            proconfigs.push(proconfig.map(|s| s.to_string()));
+            proacls.push(proacl.map(|s| s.to_string()));
+        }
+
+        // Create Arrow arrays
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int32Array::from(oids)),
+            Arc::new(StringArray::from(pronames)),
+            Arc::new(Int32Array::from(pronamespaces)),
+            Arc::new(Int32Array::from(proowners)),
+            Arc::new(Int32Array::from(prolangs)),
+            Arc::new(Float32Array::from(procosts)),
+            Arc::new(Float32Array::from(prorows_vec)),
+            Arc::new(Int32Array::from(provariadics)),
+            Arc::new(Int32Array::from(prosupports)),
+            Arc::new(StringArray::from(prokinds)),
+            Arc::new(BooleanArray::from(prosecdefs)),
+            Arc::new(BooleanArray::from(proleakproofs)),
+            Arc::new(BooleanArray::from(proisstricts)),
+            Arc::new(BooleanArray::from(proretsets)),
+            Arc::new(StringArray::from(provolatiles)),
+            Arc::new(StringArray::from(proparallels)),
+            Arc::new(Int16Array::from(pronargs_vec)),
+            Arc::new(Int16Array::from(pronargdefaults_vec)),
+            Arc::new(Int32Array::from(prorettypes)),
+            Arc::new(StringArray::from(proargtypes_vec)),
+            Arc::new(StringArray::from_iter(proallargtypes.into_iter())),
+            Arc::new(StringArray::from_iter(proargmodes.into_iter())),
+            Arc::new(StringArray::from_iter(proargnames.into_iter())),
+            Arc::new(StringArray::from_iter(proargdefaults.into_iter())),
+            Arc::new(StringArray::from_iter(protrftypes.into_iter())),
+            Arc::new(StringArray::from(prosrcs)),
+            Arc::new(StringArray::from_iter(probins.into_iter())),
+            Arc::new(StringArray::from_iter(prosqlbodies.into_iter())),
+            Arc::new(StringArray::from_iter(proconfigs.into_iter())),
+            Arc::new(StringArray::from_iter(proacls.into_iter())),
+        ];
+
+        Ok(RecordBatch::try_new(schema, arrays)?)
+    }
+}
+
+impl PartitionStream for PgProcTable {
     fn schema(&self) -> &SchemaRef {
         &self.schema
     }
