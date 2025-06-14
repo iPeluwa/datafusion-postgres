@@ -93,21 +93,518 @@ impl PgCatalogSchemaProvider {
         Self { catalog_list }
     }
 
-    /// Create a mock empty table for pg_type
+    /// Create pg_type table with PostgreSQL type definitions
     fn create_pg_type_table(&self) -> Arc<dyn TableProvider> {
-        // Define schema for pg_type
+        // Define complete schema for pg_type
         let schema = Arc::new(Schema::new(vec![
-            Field::new("oid", DataType::Int32, false),
-            Field::new("typname", DataType::Utf8, false),
-            Field::new("typnamespace", DataType::Int32, false),
-            Field::new("typlen", DataType::Int16, false),
-            // Add other necessary columns
+            Field::new("oid", DataType::Int32, false),    // Type OID
+            Field::new("typname", DataType::Utf8, false), // Type name
+            Field::new("typnamespace", DataType::Int32, false), // Namespace OID
+            Field::new("typowner", DataType::Int32, false), // Owner OID
+            Field::new("typlen", DataType::Int16, false), // Type length (-1 for variable)
+            Field::new("typbyval", DataType::Boolean, false), // Passed by value?
+            Field::new("typtype", DataType::Utf8, false), // Type category (b=base, c=composite, etc)
+            Field::new("typcategory", DataType::Utf8, false), // General category
+            Field::new("typispreferred", DataType::Boolean, false), // Preferred type in category?
+            Field::new("typisdefined", DataType::Boolean, false), // Type is defined?
+            Field::new("typdelim", DataType::Utf8, false), // Array element delimiter
+            Field::new("typrelid", DataType::Int32, false), // Related pg_class OID (0 if not composite)
+            Field::new("typsubscript", DataType::Int32, false), // Subscript handler function OID
+            Field::new("typelem", DataType::Int32, false), // Array element type OID (0 if not array)
+            Field::new("typarray", DataType::Int32, false), // Array type OID (0 if no array type)
+            Field::new("typinput", DataType::Int32, false), // Input function OID
+            Field::new("typoutput", DataType::Int32, false), // Output function OID
+            Field::new("typreceive", DataType::Int32, false), // Binary input function OID
+            Field::new("typsend", DataType::Int32, false), // Binary output function OID
+            Field::new("typmodin", DataType::Int32, false), // Type modifier input function OID
+            Field::new("typmodout", DataType::Int32, false), // Type modifier output function OID
+            Field::new("typanalyze", DataType::Int32, false), // Analyze function OID
+            Field::new("typalign", DataType::Utf8, false), // Alignment requirement
+            Field::new("typstorage", DataType::Utf8, false), // Storage strategy
+            Field::new("typnotnull", DataType::Boolean, false), // NOT NULL constraint?
+            Field::new("typbasetype", DataType::Int32, false), // Base type OID (for domains)
+            Field::new("typtypmod", DataType::Int32, false), // Type modifier for domains
+            Field::new("typndims", DataType::Int32, false), // Array dimensions for domains
+            Field::new("typcollation", DataType::Int32, false), // Collation OID
+            Field::new("typdefaultbin", DataType::Utf8, true), // Default value in nodeToString format
+            Field::new("typdefault", DataType::Utf8, true),    // Default value as text
+            Field::new("typacl", DataType::Utf8, true),        // Access privileges
         ]));
 
-        // Create memory table with schema
-        let provider = MemTable::try_new(schema, vec![]).unwrap();
+        // Create the data for common PostgreSQL types
+        let batch =
+            Self::create_pg_type_data(schema.clone()).expect("Failed to create pg_type data");
+
+        // Create memory table with the data
+        let provider = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
 
         Arc::new(provider)
+    }
+
+    /// Create record batch with PostgreSQL type definitions
+    fn create_pg_type_data(schema: SchemaRef) -> Result<RecordBatch> {
+        // Define common PostgreSQL types that we use in our mappings
+        #[allow(clippy::type_complexity)]
+        let types: Vec<(
+            i32,
+            &str,
+            i32,
+            i32,
+            i16,
+            bool,
+            &str,
+            &str,
+            bool,
+            bool,
+            &str,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            &str,
+            &str,
+            bool,
+            i32,
+            i32,
+            i32,
+            i32,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+        )> = vec![
+            // Basic types
+            (
+                16, "bool", 11, 10, 1, true, "b", "B", true, true, ",", 0, 0, 0, 1000, 1242, 1243,
+                2556, 2557, 0, 0, 0, "c", "p", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                21, "int2", 11, 10, 2, true, "b", "N", false, true, ",", 0, 0, 0, 1005, 1242, 1243,
+                2562, 2563, 0, 0, 0, "s", "p", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                23, "int4", 11, 10, 4, true, "b", "N", true, true, ",", 0, 0, 0, 1007, 1242, 1243,
+                2562, 2563, 0, 0, 0, "i", "p", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                20, "int8", 11, 10, 8, false, "b", "N", false, true, ",", 0, 0, 0, 1016, 1242,
+                1243, 2562, 2563, 0, 0, 0, "d", "p", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                700, "float4", 11, 10, 4, true, "b", "N", false, true, ",", 0, 0, 0, 1021, 1242,
+                1243, 2562, 2563, 0, 0, 0, "i", "p", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                701, "float8", 11, 10, 8, false, "b", "N", true, true, ",", 0, 0, 0, 1022, 1242,
+                1243, 2562, 2563, 0, 0, 0, "d", "p", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1043, "varchar", 11, 10, -1, false, "b", "S", false, true, ",", 0, 0, 0, 1015,
+                1242, 1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 100, None, None, None,
+            ),
+            (
+                25, "text", 11, 10, -1, false, "b", "S", true, true, ",", 0, 0, 0, 1009, 1242,
+                1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 100, None, None, None,
+            ),
+            (
+                1082, "date", 11, 10, 4, true, "b", "D", false, true, ",", 0, 0, 0, 1182, 1242,
+                1243, 2562, 2563, 0, 0, 0, "i", "p", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1114,
+                "timestamp",
+                11,
+                10,
+                8,
+                false,
+                "b",
+                "D",
+                false,
+                true,
+                ",",
+                0,
+                0,
+                0,
+                1115,
+                1242,
+                1243,
+                2562,
+                2563,
+                0,
+                0,
+                0,
+                "d",
+                "p",
+                false,
+                0,
+                -1,
+                0,
+                0,
+                None,
+                None,
+                None,
+            ),
+            (
+                1184,
+                "timestamptz",
+                11,
+                10,
+                8,
+                false,
+                "b",
+                "D",
+                true,
+                true,
+                ",",
+                0,
+                0,
+                0,
+                1185,
+                1242,
+                1243,
+                2562,
+                2563,
+                0,
+                0,
+                0,
+                "d",
+                "p",
+                false,
+                0,
+                -1,
+                0,
+                0,
+                None,
+                None,
+                None,
+            ),
+            (
+                1083, "time", 11, 10, 8, false, "b", "D", false, true, ",", 0, 0, 0, 1183, 1242,
+                1243, 2562, 2563, 0, 0, 0, "d", "p", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1186, "interval", 11, 10, 16, false, "b", "T", false, true, ",", 0, 0, 0, 1187,
+                1242, 1243, 2562, 2563, 0, 0, 0, "d", "p", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                17, "bytea", 11, 10, -1, false, "b", "U", false, true, ",", 0, 0, 0, 1001, 1242,
+                1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1700, "numeric", 11, 10, -1, false, "b", "N", false, true, ",", 0, 0, 0, 1231,
+                1242, 1243, 2562, 2563, 0, 0, 0, "i", "m", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                18, "char", 11, 10, 1, true, "b", "S", false, true, ",", 0, 0, 0, 1002, 1242, 1243,
+                2562, 2563, 0, 0, 0, "c", "p", false, 0, -1, 0, 100, None, None, None,
+            ),
+            (
+                705, "unknown", 11, 10, -2, false, "p", "X", false, true, ",", 0, 0, 0, 0, 1242,
+                1243, 2562, 2563, 0, 0, 0, "c", "p", false, 0, -1, 0, 0, None, None, None,
+            ),
+            // Array types
+            (
+                1000, "_bool", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 16, 0, 1242,
+                1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1005, "_int2", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 21, 0, 1242,
+                1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1007, "_int4", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 23, 0, 1242,
+                1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1016, "_int8", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 20, 0, 1242,
+                1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1021, "_float4", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 700, 0,
+                1242, 1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1022, "_float8", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 701, 0,
+                1242, 1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1015, "_varchar", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 1043, 0,
+                1242, 1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1009, "_text", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 25, 0, 1242,
+                1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1182, "_date", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 1082, 0,
+                1242, 1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1115,
+                "_timestamp",
+                11,
+                10,
+                -1,
+                false,
+                "b",
+                "A",
+                false,
+                true,
+                ",",
+                0,
+                2750,
+                1114,
+                0,
+                1242,
+                1243,
+                2562,
+                2563,
+                0,
+                0,
+                0,
+                "i",
+                "x",
+                false,
+                0,
+                -1,
+                0,
+                0,
+                None,
+                None,
+                None,
+            ),
+            (
+                1185,
+                "_timestamptz",
+                11,
+                10,
+                -1,
+                false,
+                "b",
+                "A",
+                false,
+                true,
+                ",",
+                0,
+                2750,
+                1184,
+                0,
+                1242,
+                1243,
+                2562,
+                2563,
+                0,
+                0,
+                0,
+                "i",
+                "x",
+                false,
+                0,
+                -1,
+                0,
+                0,
+                None,
+                None,
+                None,
+            ),
+            (
+                1183, "_time", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 1083, 0,
+                1242, 1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1187,
+                "_interval",
+                11,
+                10,
+                -1,
+                false,
+                "b",
+                "A",
+                false,
+                true,
+                ",",
+                0,
+                2750,
+                1186,
+                0,
+                1242,
+                1243,
+                2562,
+                2563,
+                0,
+                0,
+                0,
+                "i",
+                "x",
+                false,
+                0,
+                -1,
+                0,
+                0,
+                None,
+                None,
+                None,
+            ),
+            (
+                1001, "_bytea", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 17, 0,
+                1242, 1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1231, "_numeric", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 1700, 0,
+                1242, 1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+            (
+                1002, "_char", 11, 10, -1, false, "b", "A", false, true, ",", 0, 2750, 18, 0, 1242,
+                1243, 2562, 2563, 0, 0, 0, "i", "x", false, 0, -1, 0, 0, None, None, None,
+            ),
+        ];
+
+        // Convert to Arrow arrays
+        let mut oids = Vec::new();
+        let mut typnames = Vec::new();
+        let mut typnamespaces = Vec::new();
+        let mut typowners = Vec::new();
+        let mut typlens = Vec::new();
+        let mut typbyvals = Vec::new();
+        let mut typtypes = Vec::new();
+        let mut typcategories = Vec::new();
+        let mut typispreferreds = Vec::new();
+        let mut typisdefineds = Vec::new();
+        let mut typdelims = Vec::new();
+        let mut typrelids = Vec::new();
+        let mut typsubscripts = Vec::new();
+        let mut typelems = Vec::new();
+        let mut typarrays = Vec::new();
+        let mut typinputs = Vec::new();
+        let mut typoutputs = Vec::new();
+        let mut typreceives = Vec::new();
+        let mut typsends = Vec::new();
+        let mut typmodins = Vec::new();
+        let mut typmodouts = Vec::new();
+        let mut typanalyzes = Vec::new();
+        let mut typaligns = Vec::new();
+        let mut typstorages = Vec::new();
+        let mut typnotnulls = Vec::new();
+        let mut typbasetypes = Vec::new();
+        let mut typtypemods = Vec::new();
+        let mut typndimss = Vec::new();
+        let mut typcollations = Vec::new();
+        let mut typdefaultbins: Vec<Option<String>> = Vec::new();
+        let mut typdefaults: Vec<Option<String>> = Vec::new();
+        let mut typacls: Vec<Option<String>> = Vec::new();
+
+        for (
+            oid,
+            typname,
+            typnamespace,
+            typowner,
+            typlen,
+            typbyval,
+            typtype,
+            typcategory,
+            typispreferred,
+            typisdefined,
+            typdelim,
+            typrelid,
+            typsubscript,
+            typelem,
+            typarray,
+            typinput,
+            typoutput,
+            typreceive,
+            typsend,
+            typmodin,
+            typmodout,
+            typanalyze,
+            typalign,
+            typstorage,
+            typnotnull,
+            typbasetype,
+            typtypemod,
+            typndims,
+            typcollation,
+            typdefaultbin,
+            typdefault,
+            typacl,
+        ) in types
+        {
+            oids.push(oid);
+            typnames.push(typname.to_string());
+            typnamespaces.push(typnamespace);
+            typowners.push(typowner);
+            typlens.push(typlen);
+            typbyvals.push(typbyval);
+            typtypes.push(typtype.to_string());
+            typcategories.push(typcategory.to_string());
+            typispreferreds.push(typispreferred);
+            typisdefineds.push(typisdefined);
+            typdelims.push(typdelim.to_string());
+            typrelids.push(typrelid);
+            typsubscripts.push(typsubscript);
+            typelems.push(typelem);
+            typarrays.push(typarray);
+            typinputs.push(typinput);
+            typoutputs.push(typoutput);
+            typreceives.push(typreceive);
+            typsends.push(typsend);
+            typmodins.push(typmodin);
+            typmodouts.push(typmodout);
+            typanalyzes.push(typanalyze);
+            typaligns.push(typalign.to_string());
+            typstorages.push(typstorage.to_string());
+            typnotnulls.push(typnotnull);
+            typbasetypes.push(typbasetype);
+            typtypemods.push(typtypemod);
+            typndimss.push(typndims);
+            typcollations.push(typcollation);
+            typdefaultbins.push(typdefaultbin.map(|s| s.to_string()));
+            typdefaults.push(typdefault.map(|s| s.to_string()));
+            typacls.push(typacl.map(|s| s.to_string()));
+        }
+
+        // Create Arrow arrays
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int32Array::from(oids)),
+            Arc::new(StringArray::from(typnames)),
+            Arc::new(Int32Array::from(typnamespaces)),
+            Arc::new(Int32Array::from(typowners)),
+            Arc::new(Int16Array::from(typlens)),
+            Arc::new(BooleanArray::from(typbyvals)),
+            Arc::new(StringArray::from(typtypes)),
+            Arc::new(StringArray::from(typcategories)),
+            Arc::new(BooleanArray::from(typispreferreds)),
+            Arc::new(BooleanArray::from(typisdefineds)),
+            Arc::new(StringArray::from(typdelims)),
+            Arc::new(Int32Array::from(typrelids)),
+            Arc::new(Int32Array::from(typsubscripts)),
+            Arc::new(Int32Array::from(typelems)),
+            Arc::new(Int32Array::from(typarrays)),
+            Arc::new(Int32Array::from(typinputs)),
+            Arc::new(Int32Array::from(typoutputs)),
+            Arc::new(Int32Array::from(typreceives)),
+            Arc::new(Int32Array::from(typsends)),
+            Arc::new(Int32Array::from(typmodins)),
+            Arc::new(Int32Array::from(typmodouts)),
+            Arc::new(Int32Array::from(typanalyzes)),
+            Arc::new(StringArray::from(typaligns)),
+            Arc::new(StringArray::from(typstorages)),
+            Arc::new(BooleanArray::from(typnotnulls)),
+            Arc::new(Int32Array::from(typbasetypes)),
+            Arc::new(Int32Array::from(typtypemods)),
+            Arc::new(Int32Array::from(typndimss)),
+            Arc::new(Int32Array::from(typcollations)),
+            Arc::new(StringArray::from_iter(typdefaultbins.into_iter())),
+            Arc::new(StringArray::from_iter(typdefaults.into_iter())),
+            Arc::new(StringArray::from_iter(typacls.into_iter())),
+        ];
+
+        Ok(RecordBatch::try_new(schema, arrays)?)
     }
 
     /// Create a mock empty table for pg_am
@@ -781,7 +1278,7 @@ impl PgAttributeTable {
                                 for (column_idx, field) in table_schema.fields().iter().enumerate()
                                 {
                                     let pg_type = into_pg_type(field.data_type())
-                                        .unwrap_or_else(|_| pgwire::api::Type::UNKNOWN);
+                                        .unwrap_or(pgwire::api::Type::UNKNOWN);
 
                                     attrelids.push(table_oid);
                                     attnames.push(field.name().clone());
